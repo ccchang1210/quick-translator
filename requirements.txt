@@ -1,0 +1,13 @@
+keyboard
+deep-translator
+pyperclip
+edge-tts
+av
+sounddevice
+numpy
+pygame
+Pillow
+pytesseract
+requests
+uiautomation
+pystray
