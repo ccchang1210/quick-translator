@@ -38,6 +38,10 @@ trigger_queue: queue.Queue = queue.Queue()
 
 last_ctrl_c_time   = 0.0
 DOUBLE_C_THRESHOLD = 0.5
+
+last_ctrl_x_time   = 0.0
+ctrl_x_count       = 0
+TRIPLE_X_THRESHOLD = 0.5
 _ctrl_down         = False
 
 
@@ -120,7 +124,16 @@ def _setup_tray(root: tk.Tk, window: TranslatorWindow) -> None:
 # Hotkey 處理
 # ════════════════════════════════════════════════════════════════
 def _on_ctrl_x():
-    trigger_queue.put(('snip', ''))
+    global last_ctrl_x_time, ctrl_x_count
+    now = time.time()
+    if now - last_ctrl_x_time < TRIPLE_X_THRESHOLD:
+        ctrl_x_count += 1
+    else:
+        ctrl_x_count = 1
+    last_ctrl_x_time = now
+    if ctrl_x_count >= 3:
+        ctrl_x_count = 0
+        trigger_queue.put(('snip', ''))
 
 
 def _on_ctrl_c():

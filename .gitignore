@@ -1,0 +1,24 @@
+# 敏感檔案
+.env
+ticktick_token.json
+
+# 個人設定（各自維護）
+settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini
