@@ -6,7 +6,6 @@ TickTick API Client（OAuth2）
 import os
 import json
 import time
-import requests
 
 _DIR        = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE  = os.path.join(_DIR, 'ticktick_token.json')
@@ -73,6 +72,7 @@ class TickTickClient:
         }
 
     def _refresh(self):
+        import requests
         resp = requests.post(
             TOKEN_URL,
             auth=(self.client_id, self.client_secret),
@@ -100,6 +100,7 @@ class TickTickClient:
             'title':   title[:200],
             'content': note[:20000],
         }
+        import requests
         resp = requests.post(
             f'{API_BASE}/task',
             headers=self._headers(),

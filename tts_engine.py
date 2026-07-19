@@ -14,33 +14,48 @@ Layer 3   Windows SAPI (PowerShell)
 """
 
 import io
+import sys
 import time
 import asyncio
 import threading
 import subprocess
-import numpy as np
+from importlib import util as _importlib_util
 
-# ── 偵測可用套件 ───────────────────────────────────────────────
-try:
-    import edge_tts as _edge_tts
-    HAS_EDGE_TTS = True
-except ImportError:
-    HAS_EDGE_TTS = False
+# ── 偵測可用套件（find_spec 只查不載入，啟動零成本）───────────────
+HAS_EDGE_TTS  = _importlib_util.find_spec('edge_tts') is not None
+HAS_STREAMING = (_importlib_util.find_spec('av') is not None
+                 and _importlib_util.find_spec('sounddevice') is not None)
+HAS_PYGAME    = _importlib_util.find_spec('pygame') is not None
 
-try:
-    import av as _av
-    import sounddevice as _sd
-    HAS_STREAMING = True
-except ImportError:
-    HAS_STREAMING = False
+_pygame_init_lock = threading.Lock()
+_pygame_ready     = False
 
-try:
-    import pygame as _pygame
-    _pygame.mixer.pre_init(44100, -16, 2, 512)   # 小 buffer → 更低啟動延遲
-    _pygame.mixer.init()
-    HAS_PYGAME = True
-except Exception:
-    HAS_PYGAME = False
+
+def _ensure_pygame():
+    """首次需要時才初始化 pygame mixer（開音訊裝置很慢，不能在啟動時做）"""
+    global _pygame_ready, HAS_PYGAME
+    with _pygame_init_lock:
+        if _pygame_ready or not HAS_PYGAME:
+            return
+        try:
+            import pygame
+            pygame.mixer.pre_init(44100, -16, 2, 512)   # 小 buffer → 更低啟動延遲
+            pygame.mixer.init()
+            _pygame_ready = True
+        except Exception:
+            HAS_PYGAME = False
+
+
+def preload():
+    """背景預熱：實際載入重型套件，讓首次朗讀不用等 import"""
+    try:
+        if HAS_EDGE_TTS:
+            import edge_tts  # noqa: F401
+        if HAS_STREAMING:
+            import av          # noqa: F401
+            import sounddevice # noqa: F401
+    except Exception:
+        pass
 
 # ── 語音設定 ────────────────────────────────────────────────────
 VOICE = 'en-US-JennyNeural'   # 美式自然女聲
@@ -122,12 +137,14 @@ class SpeakSession:
 
     def stop(self):
         self._stop.set()
-        if HAS_STREAMING:
+        _sd = sys.modules.get('sounddevice')
+        if _sd is not None:
             try:
                 _sd.stop()
             except Exception:
                 pass
-        if HAS_PYGAME:
+        _pygame = sys.modules.get('pygame')
+        if _pygame is not None and _pygame_ready:
             try:
                 _pygame.mixer.music.stop()
             except Exception:
@@ -137,6 +154,10 @@ class SpeakSession:
     # Layer 1 ★  串流播放：PyAV 解碼 + sounddevice 即時輸出
     # ──────────────────────────────────────────────────────────────
     def _run_streaming(self):
+        import edge_tts as _edge_tts
+        import av as _av
+        import sounddevice as _sd
+
         raw_buf = _StreamBuffer()
         bio     = io.BufferedReader(raw_buf, buffer_size=8192)
 
@@ -208,6 +229,12 @@ class SpeakSession:
     # ──────────────────────────────────────────────────────────────
     def _run_buffered(self):
         try:
+            import edge_tts as _edge_tts
+            import pygame as _pygame
+            _ensure_pygame()
+            if not _pygame_ready:
+                raise RuntimeError('pygame mixer 初始化失敗')
+
             buf = io.BytesIO()
 
             async def _collect():

@@ -3,47 +3,69 @@
 觸發：Ctrl+X
 
 OCR 引擎優先順序：
-  1. pytesseract + Tesseract-OCR  （英文 + 繁體中文）
-  2. 提示安裝訊息
+  1. AIS 遠端 API（AIS_API_URL/ocr）
+  2. 本機 pytesseract + Tesseract-OCR（備援）
+  3. 提示安裝訊息
 """
+import base64
 import io
+import json
+import os
 import re
-import ctypes
 import threading
+import urllib.request
 import tkinter as tk
+from importlib import util as _importlib_util
 from PIL import ImageGrab, ImageTk, Image, ImageEnhance, ImageFilter
+
+# 載入 .env 取得 AIS_API_URL
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+except ImportError:
+    pass
+
+AIS_API_URL = os.environ.get('AIS_API_URL', '').rstrip('/')
 
 # 移除 CJK 字元周圍的多餘空格（Tesseract 的已知問題）
 _CJK_SPACE = re.compile(
-    r'(?<=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\u3040-\u30ff])[ \t]+'
+    r'(?<=[一-鿿　-〿＀-￯぀-ヿ])[ \t]+'
     r'|'
-    r'[ \t]+(?=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\u3040-\u30ff])'
+    r'[ \t]+(?=[一-鿿　-〿＀-￯぀-ヿ])'
 )
 
 def _clean_cjk_spaces(text: str) -> str:
     return _CJK_SPACE.sub('', text)
 
-try:
+
+def _ocr_via_api(img: Image.Image) -> str:
+    """呼叫 AIS 遠端 OCR API，失敗時拋出例外讓呼叫端 fallback。"""
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    payload = json.dumps({'image_b64': b64, 'lang': 'eng+chi_tra'}).encode()
+    req = urllib.request.Request(
+        f'{AIS_API_URL}/ocr',
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    return data.get('text', '')
+
+
+# pytesseract 延遲載入：啟動時只確認存在，OCR 時才 import
+HAS_TESS = _importlib_util.find_spec('pytesseract') is not None
+_TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+
+def _get_pytesseract():
     import pytesseract
-    import os
-    # 明確指定 Tesseract 路徑與語言資料路徑（避免 PATH 未生效的問題）
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
     os.environ.setdefault('TESSDATA_PREFIX',
                           os.path.expandvars(r'%USERPROFILE%\tessdata'))
-    HAS_TESS = True
-except ImportError:
-    HAS_TESS = False
-
-
-# ── DPI 縮放比例（處理 150%/200% 高解析螢幕）────────────────────
-def _dpi_scale() -> float:
-    try:
-        hdc  = ctypes.windll.user32.GetDC(0)
-        dpi  = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)   # LOGPIXELSX
-        ctypes.windll.user32.ReleaseDC(0, hdc)
-        return dpi / 96.0
-    except Exception:
-        return 1.0
+    return pytesseract
 
 
 # ════════════════════════════════════════════════════════════════
@@ -70,9 +92,9 @@ class SnipOverlay:
         except Exception:
             self._app_info = {}
 
-        # ② 截圖
+        # ② 截圖（縮放比例改在 _build 內用「截圖尺寸 ÷ 螢幕邏輯尺寸」計算，
+        #    不論 DPI 設定為何都正確）
         self._screenshot = ImageGrab.grab(all_screens=False)
-        self._scale      = _dpi_scale()
         self._build()
 
     # ── 建立全螢幕 overlay ─────────────────────────────────────
@@ -87,13 +109,18 @@ class SnipOverlay:
         win.geometry(f'{sw}x{sh}+0+0')
         win.bind('<Escape>', lambda e: self._cancel())
 
-        # ── 暗化背景截圖 ──────────────────────────────────────
-        # 以邏輯解析度顯示（螢幕顯示），但保留原圖供裁切
-        display_img  = self._screenshot.resize((sw, sh), Image.LANCZOS)
-        dark_layer   = Image.new('RGBA', (sw, sh), (0, 0, 0, 130))
-        display_rgba = display_img.convert('RGBA')
-        darkened     = Image.alpha_composite(display_rgba, dark_layer).convert('RGB')
-        self._bg_tk  = ImageTk.PhotoImage(darkened)
+        # ── 縮放比例：截圖實際像素 ÷ tkinter 邏輯像素 ─────────
+        shot_w, shot_h = self._screenshot.size
+        self._scale_x  = shot_w / sw
+        self._scale_y  = shot_h / sh
+
+        # ── 暗化背景截圖（Brightness 比 alpha 合成快數倍；
+        #    尺寸相同時跳過縮放）─────────────────────────────
+        display_img = self._screenshot
+        if (shot_w, shot_h) != (sw, sh):
+            display_img = display_img.resize((sw, sh), Image.BILINEAR)
+        darkened    = ImageEnhance.Brightness(display_img).enhance(0.5)
+        self._bg_tk = ImageTk.PhotoImage(darkened)
 
         # ── Canvas ──────────────────────────────────────────────
         canvas = tk.Canvas(win, cursor='crosshair', highlightthickness=0)
@@ -127,18 +154,15 @@ class SnipOverlay:
         x0, y0 = self._x0, self._y0
         x1, y1 = e.x, e.y
 
-        # 外框
         self._rect_id = c.create_rectangle(
             x0, y0, x1, y1,
             outline='#89b4fa', width=2)
 
-        # 四角標記（讓框看起來更清晰）
         sz = 6
         for cx, cy in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]:
             c.create_rectangle(cx - sz, cy - sz, cx + sz, cy + sz,
                                fill='#89b4fa', outline='', tags='corner')
 
-        # 尺寸提示
         w = abs(x1 - x0)
         h = abs(y1 - y0)
         self._dim_id = c.create_text(
@@ -153,14 +177,12 @@ class SnipOverlay:
         y2 = max(self._y0, e.y)
 
         if x2 - x1 < 8 or y2 - y1 < 8:
-            return    # 太小，忽略
+            return
 
-        # 換成物理像素座標裁切原始截圖
-        s   = self._scale
-        px1, py1 = int(x1 * s), int(y1 * s)
-        px2, py2 = int(x2 * s), int(y2 * s)
+        px1, py1 = int(x1 * self._scale_x), int(y1 * self._scale_y)
+        px2, py2 = int(x2 * self._scale_x), int(y2 * self._scale_y)
         region = self._screenshot.crop((px1, py1, px2, py2))
-        self._orig_region = region        # 保留未前處理原圖供 action_menu 使用
+        self._orig_region = region
 
         self._cancel()
         threading.Thread(target=lambda: self._ocr(region), daemon=True).start()
@@ -183,8 +205,19 @@ class SnipOverlay:
 
     # ── OCR ─────────────────────────────────────────────────────
     def _ocr(self, img: Image.Image):
-        raw_img = self._orig_region   # 原始截圖（未前處理）供 action_menu 使用
+        raw_img = self._orig_region
 
+        # ── 優先：AIS 遠端 API ──────────────────────────────────
+        if AIS_API_URL:
+            try:
+                text = _ocr_via_api(img)
+                text = _clean_cjk_spaces(text.strip())
+                self._deliver(text, raw_img)
+                return
+            except Exception:
+                pass  # fallback to local
+
+        # ── 備援：本機 Tesseract ────────────────────────────────
         if not HAS_TESS:
             self._deliver('[需要安裝 Tesseract-OCR]\n\n'
                           '1. 下載安裝：https://github.com/UB-Mannheim/tesseract/wiki\n'
@@ -194,7 +227,7 @@ class SnipOverlay:
             return
 
         try:
-            # 前處理：放大 + 灰階 + 對比 + 銳化  → 提升識別率
+            pytesseract = _get_pytesseract()
             w, h  = img.size
             scale = max(1, min(4, 2400 // max(w, h, 1)))
             if scale > 1:
@@ -204,7 +237,6 @@ class SnipOverlay:
             img = ImageEnhance.Contrast(img).enhance(2.0)
             img = img.filter(ImageFilter.SHARPEN)
 
-            # 嘗試英文 + 繁體中文，若語言包缺失退回純英文
             try:
                 text = pytesseract.image_to_string(
                     img, lang='eng+chi_tra',

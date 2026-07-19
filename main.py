@@ -42,7 +42,6 @@ DOUBLE_C_THRESHOLD = 0.5
 last_ctrl_x_time   = 0.0
 ctrl_x_count       = 0
 TRIPLE_X_THRESHOLD = 0.5
-_ctrl_down         = False
 
 
 # ════════════════════════════════════════════════════════════════
@@ -137,17 +136,13 @@ def _on_ctrl_x():
 
 
 def _on_ctrl_c():
+    # 注意：此 callback 在鍵盤鉤子執行緒上執行，必須極快返回，
+    # 否則會拖慢全系統按鍵。剪貼簿讀取移到 tkinter 主執行緒（poll_trigger）。
     global last_ctrl_c_time
     now = time.time()
     if now - last_ctrl_c_time < DOUBLE_C_THRESHOLD:
         last_ctrl_c_time = 0.0
-        clip = ''
-        if pyperclip:
-            try:
-                clip = pyperclip.paste() or ''
-            except Exception:
-                pass
-        trigger_queue.put(('translate', clip))
+        trigger_queue.put(('translate', None))   # None = 稍後讀剪貼簿
     else:
         last_ctrl_c_time = now
 
@@ -158,6 +153,13 @@ def poll_trigger(root, window, snip):
         while True:
             action, data = trigger_queue.get_nowait()
             if action == 'translate':
+                if data is None:            # hotkey 觸發：在主執行緒讀剪貼簿
+                    data = ''
+                    if pyperclip:
+                        try:
+                            data = pyperclip.paste() or ''
+                        except Exception:
+                            pass
                 window.show(data)
             elif action == 'snip':
                 snip.start()
@@ -187,19 +189,27 @@ def main():
         on_capture = lambda text, img, info: menu.show(text, img, info),
     )
 
-    def _global_hook(event):
-        global _ctrl_down
-        if event.name in ('ctrl', 'left ctrl', 'right ctrl'):
-            _ctrl_down = (event.event_type == 'down')
-        elif event.event_type == 'down' and _ctrl_down and event.name == 'c':
-            _on_ctrl_c()
-
-    keyboard.hook(_global_hook)
+    # add_hotkey 只在組合鍵成立時執行 callback，
+    # 取代舊的 keyboard.hook（每一次全系統按鍵都跑 Python，造成輸入卡頓）
+    keyboard.add_hotkey('ctrl+c', _on_ctrl_c, suppress=False)
     keyboard.add_hotkey('ctrl+x', _on_ctrl_x, suppress=False)
 
     _setup_tray(root, window)
 
     root.after(100, lambda: poll_trigger(root, window, snip))
+
+    # ── 背景預熱：啟動 1.5 秒後預載重型套件，首次翻譯/朗讀不用等 ──
+    def _warmup():
+        def _run():
+            try:
+                import tts_engine
+                tts_engine.preload()
+                import deep_translator  # noqa: F401
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    root.after(1500, _warmup)
 
     print("=" * 44)
     print("  Quick Translator 已在背景執行")

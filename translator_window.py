@@ -8,28 +8,20 @@
 import os
 import tkinter as tk
 import threading
+from importlib import util as _importlib_util
+
+# 載入 .env（AIS_API_URL 等）
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+except ImportError:
+    pass
 
 import settings as _cfg
 from tts_engine import SpeakSession, engine_name, HAS_EDGE_TTS, HAS_PYGAME
 
-# 載入 .env（ANTHROPIC_API_KEY 等）
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
-except ImportError:
-    pass
-
-try:
-    import anthropic as _anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-
-try:
-    from deep_translator import GoogleTranslator
-    HAS_TRANSLATOR = True
-except ImportError:
-    HAS_TRANSLATOR = False
+# deep_translator 很重（requests + bs4），只偵測存在與否，用到才 import
+HAS_TRANSLATOR = _importlib_util.find_spec('deep_translator') is not None
 
 try:
     import pyperclip
@@ -540,10 +532,6 @@ class TranslatorWindow:
     def _optimize_english(self):
         import urllib.request
         import json as _json
-        import socket
-        import subprocess
-        import shutil
-        import time
 
         text = self.src.get('1.0', 'end-1c').strip()
         if not text:
@@ -552,58 +540,22 @@ class TranslatorWindow:
         self.btn_optimize.config(state='disabled', text='處理中…')
         self._set_status('AI 優化中…')
 
-        prompt = (
-            'Fix any spelling and grammar errors in the following English text. '
-            'Return ONLY the corrected text with no explanation, '
-            'no quotes, and no extra commentary:\n\n' + text
-        )
-
-        def _ollama_running():
-            try:
-                s = socket.create_connection(('localhost', 11434), timeout=1)
-                s.close()
-                return True
-            except Exception:
-                return False
+        ais_url = os.environ.get('AIS_API_URL', '').rstrip('/')
 
         def _run():
-            ollama_exe = (shutil.which('ollama') or
-                          r'C:\Users\USER\AppData\Local\Programs\Ollama\ollama.exe')
-            proc          = None
-            we_started_it = False
-
             try:
-                if not _ollama_running():
-                    self.win.after(0, lambda: self._set_status('啟動 Ollama…'))
-                    proc = subprocess.Popen(
-                        [ollama_exe, 'serve'],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    we_started_it = True
-                    # 等待 Ollama 就緒（最多 20 秒）
-                    for _ in range(40):
-                        if _ollama_running():
-                            break
-                        time.sleep(0.5)
-                    else:
-                        raise RuntimeError('Ollama 啟動逾時')
-                    self.win.after(0, lambda: self._set_status('AI 優化中…'))
+                if not ais_url:
+                    raise RuntimeError('AIS_API_URL 未設定')
 
-                payload = _json.dumps({
-                    'model': 'gemma3:4b',
-                    'messages': [{'role': 'user', 'content': prompt}],
-                    'stream': False,
-                }).encode()
-
+                payload = _json.dumps({'text': text}).encode()
                 req = urllib.request.Request(
-                    'http://localhost:11434/api/chat',
+                    f'{ais_url}/optimize',
                     data=payload,
                     headers={'Content-Type': 'application/json'},
                 )
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=120) as resp:
                     data      = _json.loads(resp.read())
-                    corrected = data['message']['content'].strip()
+                    corrected = data.get('corrected', '').strip()
 
                 def _apply():
                     self._set_source(corrected)
@@ -618,16 +570,6 @@ class TranslatorWindow:
                     self._set_status(f'優化失敗：{m}', error=True)
                     self.btn_optimize.config(state='normal', text='✨ 優化')
                 self.win.after(0, _err)
-
-            finally:
-                # 用完就關閉 Ollama，不佔記憶體
-                if we_started_it:
-                    time.sleep(1)
-                    subprocess.run(
-                        ['taskkill', '/F', '/IM', 'ollama.exe'],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -717,6 +659,7 @@ class TranslatorWindow:
 
         def _run():
             try:
+                from deep_translator import GoogleTranslator
                 result = GoogleTranslator(source=src_lang, target=tgt_lang).translate(text)
                 if self.win and self.win.winfo_exists():
                     self.win.after(0, lambda: self._set_dst(result))

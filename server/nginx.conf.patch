@@ -1,0 +1,9 @@
+在 nginx.conf 的 server {} 裡加入以下 location block：
+
+        # Quick Translator API (runs on host port 3030)
+        location /translator/ {
+            proxy_pass         http://host.docker.internal:3030/;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_read_timeout 120s;
+        }
